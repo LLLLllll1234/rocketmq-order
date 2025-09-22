@@ -1,0 +1,23 @@
+server:
+  port: 8088
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/orderdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=utf8
+    username: demo
+    password: demo
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQL8Dialect
+    open-in-view: false
+
+app:
+  rocketmq:
+    endpoints: "localhost:8081"         # RocketMQ Proxy endpoint
+    fifoTopic: "OrderFifoTopic"
+    txnTopic: "OrderTxnTopic"
+    fifoGroup: "OrderFifoGroup"
