@@ -11,16 +11,25 @@ import org.apache.rocketmq.client.apis.consumer.PushConsumer;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.apis.producer.TransactionChecker;
 import org.apache.rocketmq.client.apis.producer.TransactionResolution;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 
-@Log4j2
 @Configuration
 public class RocketMQConfig {
+    private static final Logger log = LoggerFactory.getLogger(RocketMQConfig.class);
+
+    @org.springframework.beans.factory.annotation.Value("${app.rocket.delayTopic}")
+    private String delayTopic;
+
+    @org.springframework.beans.factory.annotation.Value("${app.rocketmq.delayGroup}")
+    private String delayGroup;
+
     @Value("${app.rocketmq.endpoints}")
     private String endpoints;
 
@@ -33,21 +42,19 @@ public class RocketMQConfig {
     @Value("${app.rocketmq.fifoGroup}")
     private String fifoGroup;
 
-    /**
+    /*
      * 创建 RocketMQ 客户端服务提供者
-     * @return
      */
     @Bean
     public ClientServiceProvider clientServiceProvider() {
         return ClientServiceProvider.loadService();
     }
 
-    /**
+    /*
      * 创建客户端配置对象
      * 设置 RocketMQ 服务器的连接端点（从 app.rocketmq.endpoints 配置项读取）
      * 这个配置会被所有的生产者和消费者共享使用
      * 包含连接超时、重试策略等基础配置
-     * @return
      */
     @Bean
     public ClientConfiguration clientConfiguration() {
@@ -55,7 +62,7 @@ public class RocketMQConfig {
         return builder.build();
     }
 
-    /**
+    /*
      *  创建 FIFO（顺序）消息生产者
      * 用于发送有序消息，保证同一订单的消息按顺序处理
      * 绑定到 fifoTopic（从配置文件读取）
@@ -64,10 +71,13 @@ public class RocketMQConfig {
     /** Producer for FIFO (normal ordered messages). */
     @Bean(destroyMethod = "close")
     public Producer fifoProducer(ClientServiceProvider provider, ClientConfiguration cfg) throws Exception {
-        return provider.newProducerBuilder().setClientConfiguration(cfg).setTopics(fifoTopic).build();
+        return provider.newProducerBuilder().
+                setClientConfiguration(cfg).
+                setTopics(fifoTopic).
+                build();
     }
 
-    /**
+    /*
      * 事务消息检查器，用于处理事务消息的回查机制
      * 当 RocketMQ 无法确定事务消息状态时，会调用此检查器
      * 通过查询数据库中是否存在该订单来决定事务结果：
@@ -127,9 +137,14 @@ public class RocketMQConfig {
                     ByteBuffer bodyBuffer = messageView.getBody();
                     byte[] bodyBytes = new byte[bodyBuffer.remaining()];
                     bodyBuffer.get(bodyBytes);
-                    String body = new String(bodyBytes, java.nio.charset.StandardCharsets.UTF_8);
+                    String body = StandardCharsets.UTF_8.decode(messageView.getBody()).toString();
                     try {
                         String[] parts = body.split("：");
+                        if (parts.length < 2) {
+                            log.warn("Malformed fifo message, skipping. Body={}, MessageId={}",
+                                    body, messageView.getMessageId());
+                            return org.apache.rocketmq.client.apis.consumer.ConsumeResult.SUCCESS;
+                        }
                         String orderId = parts[0];
                         String step =  parts[1];
                         if ("PAID".equalsIgnoreCase(step)) {
@@ -139,12 +154,77 @@ public class RocketMQConfig {
                         }
                         return org.apache.rocketmq.client.apis.consumer.ConsumeResult.SUCCESS;
                     } catch (Exception e) {
-                        e.printStackTrace();
+                        log.error("Failed to process fifo message. MessageId={}", messageView.getMessageId(), e);
                         return ConsumeResult.FAILURE;
                     }
                 })
                 .build();
     }
 
+    /* Producer reused for delay topic as well. No special client needed. */
+
+    /* Consumer for Delay Topic: auto-close unpaid orders after 30 minutes. */
+    @Bean(destroyMethod = "close")
+    public pushConsumer delayConsumer(ClientServiceProvider provider, ClientConfiguration cfg,
+                                      com.example.orderdemo.service.OrderService orderService) throws Exception{
+        FilterExpression fe = new FilterExpression("*", FilterExpressionType.TAG);
+        return provider.newPushConsumerBuilder()
+                .setClientConfiguration(cfg)
+                .setConsumerGroup(delayGroup)
+                .setSubscriptionExpressions(Collections.singletonMap(delayTopic, fe))
+                .setMessageListener(messageView -> {
+                    String body = StandardCharsets.UTF_8.decode(messageView.getBody()).toString();
+                    try {
+                        String[] parts = body.split(":");
+                        if (parts.length < 2) {
+                            log.warn("Malformed delay message, skipping. Body={}, MessageId={}",
+                                    body, messageView.getMessageId());
+                            return ConsumeResult.SUCCESS;
+                        }
+                        String orderId = parts[0];
+                        String step =  parts[1];
+                        if ("CLOSE".equalsIgnoreCase(step)) {
+                            orderService.autoClose(orderId);
+                        }
+                        return ConsumeResult.SUCCESS;
+                    } catch (Exception e) {
+                        log.error("Failed to process delay message. MessageId={}", messageView.getMessageId(), e);
+                        return ConsumeResult.FAILURE; // trigger retry/backoff
+                    }
+                })
+                .build();
+    }
+
+    /** DLQ watcher for FIFO group. */
+    @Bean(destroyMethod = "close")
+    public PushConsumer dlqFifoWatcher(ClientServiceProvider provider, ClientConfiguration cfg) throws Exception {
+        String dlqTopic = "%DLQ%" + fifoGroup;
+        FilterExpression fe = new FilterExpression("*", FilterExpressionType.TAG);
+        return provider.newPushConsumerBuilder()
+                .setClientConfiguration(cfg)
+                .setConsumerGroup("DLQWatcherFifo")
+                .setSubscriptionExpressions(Collections.singletonMap(dlqTopic, fe))
+                .setMessageListener(messageView -> {
+                    log.warn("[DLQ][FIFO] messageId={}, body={}", messageView.getMessageId(), StandardCharsets.UTF_8.decode(messageView.getBody()).toString());
+                    return org.apache.rocketmq.client.apis.consumer.ConsumeResult.SUCCESS;
+                })
+                .build();
+    }
+
+    /** DLQ watcher for Delay group. */
+    @Bean(destroyMethod = "close")
+    public PushConsumer dlqDelayWatcher(ClientServiceProvider provider, ClientConfiguration cfg) throws Exception {
+        String dlqTopic = "%DLQ%" + delayGroup;
+        FilterExpression fe = new FilterExpression("*", FilterExpressionType.TAG);
+        return provider.newPushConsumerBuilder()
+                .setClientConfiguration(cfg)
+                .setConsumerGroup("DLQWatcherDelay")
+                .setSubscriptionExpressions(Collections.singletonMap(dlqTopic, fe))
+                .setMessageListener(messageView -> {
+                    log.warn("[DLQ][DELAY] messageId={}, body={}", messageView.getMessageId(), StandardCharsets.UTF_8.decode(messageView.getBody()).toString());
+                    return org.apache.rocketmq.client.apis.consumer.ConsumeResult.SUCCESS;
+                })
+                .build();
+    }
 
 }

@@ -7,3 +7,10 @@ mqadmin updateSubGroup -n 127.0.0.1:9876 -c DefaultCluster -g OrderFifoGroup -o 
 mqadmin updateTopic -n 127.0.0.1:9876 -t OrderTxnTopic  -c DefaultCluster -a +message.type=TRANSACTION
 echo "Topics and group created."
 '
+
+# 3) DELAY topic for auto-close & its consumer group
+docker exec -it rmqbroker sh -lc '
+mqadmin updateTopic -n 127.0.0.1:9876 -t OrderDelayTopic -c DefaultCluster -a +message.type=DELAY
+mqadmin updateSubGroup -n 127.0.0.1:9876 -c DefaultCluster -g OrderDelayGroup
+echo "Delay topic/group created."
+'

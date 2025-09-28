@@ -13,8 +13,10 @@ import java.util.UUID;
 
 @Service
 public class OrderService {
+    private static final long CLOSE_DELAY_MILLIS = 30 * 60 * 1000;
     private final OrderRepository orderRepo;
     private final OrderEventPublisher publisher;
+    private final IdempotentService idem;
 
     /**
      * 依赖注入构造函数
@@ -24,9 +26,10 @@ public class OrderService {
      * @param orderRepo
      * @param publisher
      */
-    public OrderService(OrderRepository orderRepo, OrderEventPublisher publisher) {
+    public OrderService(OrderRepository orderRepo, OrderEventPublisher publisher, IdempotentService idem) {
         this.orderRepo = orderRepo;
         this.publisher = publisher;
+        this.idem = idem;
     }
 
     /**
@@ -56,6 +59,9 @@ public class OrderService {
 
             // 3) Commit message transaction after DB success
             tx.commit();
+
+            // 4)  Schedule auto-close if unpaid in 30 minutes
+            publisher.sendDelayClose(orderId, CLOSE_DELAY_MILLIS);
             return orderId;
         } catch (Exception e) {
             if (tx != null) {
@@ -108,11 +114,14 @@ public class OrderService {
     //called by consumer
     @Transactional
     public void markPaid(String orderId) {
-        orderRepo.findByOrderId(orderId).ifPresent(o -> {
-            if (o.getStatus().ordinal() == OrderStatus.CREATED.ordinal()) {
-                o.setStatus(OrderStatus.PAID);
-                orderRepo.save(o);
-            }
+        String dedupKey = "order:" + orderId + ":PAID";
+        idem.processOnce(dedupKey, null, () -> {
+            orderRepo.findByOrderId(orderId).ifPresent(o -> {
+                if (o.getStatus().ordinal() <= OrderStatus.CREATED.ordinal()) {
+                    o.setStatus(OrderStatus.PAID);
+                    orderRepo.save(o);
+                }
+            });
         });
     }
 
@@ -127,9 +136,22 @@ public class OrderService {
      */
     @Transactional
     public void markShipped(String orderId) {
+        String dedupKey = "order:" + orderId + ":SHIPPED";
+        idem.processOnce(dedupKey, null, () -> {
+            orderRepo.findByOrderId(orderId).ifPresent(o -> {
+                if (o.getStatus().ordinal() <= OrderStatus.PAID.ordinal()) {
+                    o.setStatus(OrderStatus.SHIPPED);
+                    orderRepo.save(o);
+                }
+            });
+        });
+    }
+
+    @Transactional
+    public void autoClose(String orderId)  {
         orderRepo.findByOrderId(orderId).ifPresent(o -> {
-            if (o.getStatus().ordinal() == OrderStatus.PAID.ordinal()) {
-                o.setStatus(OrderStatus.SHIPPED);
+            if (o.getStatus() == OrderStatus.CREATED) {
+                o.setStatus(OrderStatus.CANCELLED);
                 orderRepo.save(o);
             }
         });

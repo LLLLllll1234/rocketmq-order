@@ -15,54 +15,51 @@ public class OrderEventPublisher {
     private final Producer txnProducer;
     private final String fifoTopic;
     private final String txnTopic;
+    private final String delayTopic;
 
-    /**
+    /*
      * 依赖注入初始化
      * 注入 ClientServiceProvider：用于创建消息对象
      * 注入 fifoProducer：FIFO 顺序消息生产者
      * 注入 txnProducer：事务消息生产者
      * 获取配置的主题名称
-     * @param provider
-     * @param fifoProducer
-     * @param txnProducer
-     * @param fifoTopic
-     * @param txnTopic
      */
     public OrderEventPublisher(ClientServiceProvider provider,
                                Producer fifoProducer,
                                Producer txnProducer,
                                @Value("${app.rocketmq.fifoTopic}") String fifoTopic,
-                               @Value("${app.rocketmq.txnTopic}") String txnTopic) {
+                               @Value("${app.rocketmq.txnTopic}") String txnTopic,
+                               @Value("${app.rocketmq.delayTopic}") String delayTopic) {
         this.provider = provider;
         this.fifoProducer = fifoProducer;
         this.txnProducer = txnProducer;
         this.fifoTopic = fifoTopic;
         this.txnTopic = txnTopic;
+        this.delayTopic = delayTopic;
     }
 
-    /**
+    //delayTopic 变量在 sendDelayClose 方法中被实际使用，该方法用于发送一个延时消息来自动关闭超时未支付的订单。
+
+    /*
      * 发送 FIFO 顺序消息，用于订单状态变更事件
      * setTopic(fifoTopic)：设置目标主题
      * setKeys(orderId)：设置消息键（用于查询和过滤）
      * setTag("order_event")：设置消息标签
      * setMessageGroup(orderId)：关键！设置消息组，确保同一订单的消息有序处理
      * setBody(...)：消息体格式为 "订单ID:状态"
-     * @param orderId
-     * @param step
-     * @return
-     * @throws Exception
      */
     public SendReceipt sendFifo(String orderId, String step) throws Exception {
         Message msg = provider.newMessageBuilder()
                 .setTopic(fifoTopic)
                 .setKeys(orderId)
                 .setTag("order_event")
+                .setMessageGroup(orderId)
                 .setBody((orderId + ":" + step).getBytes())
                 .build();
         return fifoProducer.send(msg);
     }
 
-    /**
+    /*
      * 发送事务消息，用于订单创建事件
      * 事务流程：
      * beginTransaction()：开始事务
@@ -73,8 +70,6 @@ public class OrderEventPublisher {
      * 消息体格式："created:订单ID"
      * send(msg, tx)：发送半消息（事务预提交状态）
      * TxHolder.set(tx)：将事务句柄存储到 ThreadLocal，供业务层使用
-     * @param orderId
-     * @throws Exception
      */
     public void sendTxnCreated(String orderId) throws Exception {
         final Transaction tx = txnProducer.beginTransaction();
@@ -102,6 +97,19 @@ public class OrderEventPublisher {
         public static void clear() {TL.remove();}
     }
 
+    /** Schedule an auto-close message after `delayMillis` for a given orderId. */
+    public SendReceipt sendDelayClose(String orderId, long delayMillis) throws Exception {
+        long ts = System.currentTimeMillis() + delayMillis;
+        Message msg = provider.newMessageBuilder()
+                .setTopic(delayTopic)
+                .setKeys(orderId)
+                .setTag("order_ttl")
+                .setMessageGroup(orderId)
+                .setDeliveryTimestamp(ts)
+                .setBody((orderId + ":" + "CLOSE").getBytes())
+                .build();
+        return fifoProducer.send(msg);
+    }
 
 
 }
