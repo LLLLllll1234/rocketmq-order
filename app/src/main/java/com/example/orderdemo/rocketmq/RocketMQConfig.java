@@ -85,7 +85,7 @@ public class RocketMQConfig {
         };
     }
 
-    /**
+    /*
      * 创建事务消息生产者
      * 用于发送事务消息，确保数据库操作和消息发送的原子性
      * 设置事务检查器，用于处理未知状态的事务消息
@@ -103,16 +103,16 @@ public class RocketMQConfig {
                 .build();
     }
 
-    /**
-     * 创建 FIFO 主题的推送式消费者
-     * 订阅设置：订阅 fifoTopic，接收所有标签的消息（"*"）
-     * 消费组：使用 fifoGroup 作为消费者组
-     * 消息处理逻辑：
-     * 解析消息体格式：订单ID:操作类型
-     * 根据操作类型调用相应的服务方法：
-     * PAID → 调用 orderService.markPaid(orderId) 标记为已支付
-     * SHIPPED → 调用 orderService.markShipped(orderId) 标记为已发货
-     * 返回消费结果（成功或失败）
+    /*
+      创建 FIFO 主题的推送式消费者
+      订阅设置：订阅 fifoTopic，接收所有标签的消息（"*"）
+      消费组：使用 fifoGroup 作为消费者组
+      消息处理逻辑：
+      解析消息体格式：订单ID:操作类型
+      根据操作类型调用相应的服务方法：
+      PAID → 调用 orderService.markPaid(orderId) 标记为已支付
+      SHIPPED → 调用 orderService.markShipped(orderId) 标记为已发货
+      返回消费结果（成功或失败）
      */
     /** Push consumer for FIFO topic to update order state (PAID, SHIPPED). */
     @Bean(destroyMethod = "close")
